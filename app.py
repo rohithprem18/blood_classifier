@@ -1,58 +1,65 @@
-from flask import Flask, request, jsonify
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
 from tensorflow.keras.models import load_model
 from PIL import Image
 import numpy as np
 import io
 
-app = Flask(__name__)
+# Initialize FastAPI app
+app = FastAPI(title="Blood Group Classifier API")
 
-# Load model
-model = load_model("blood_group_cnn_model.keras")
+# Load the trained Keras model
+MODEL_PATH = "blood_classifier.keras"
+model = load_model(MODEL_PATH)
 
-# Same label mapping used in your training
-label_map = {'B+': 0, 'O+': 1, 'A+': 2, 'B-': 3, 'AB-': 4, 'A-': 5, 'O-': 6, 'AB+': 7}
-reverse_label_map = {i: class_name for class_name, i in label_map.items()}
-
+# Target image size (same as training)
 TARGET_SIZE = (128, 128)
 
+# Label mapping (same order as in training)
+label_map = {
+    'B+': 0, 'O+': 1, 'A+': 2, 'B-': 3,
+    'AB-': 4, 'A-': 5, 'O-': 6, 'AB+': 7
+}
+reverse_label_map = {v: k for k, v in label_map.items()}
+
+
+# Helper function: preprocess uploaded image
 def preprocess_image(image_bytes):
     try:
-        img = Image.open(io.BytesIO(image_bytes))
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         img = img.resize(TARGET_SIZE)
-        img_array = np.array(img) / 255.0
+        img_array = np.array(img, dtype=np.float32) / 255.0
         img_array = np.expand_dims(img_array, axis=0)
         return img_array
     except Exception as e:
-        print(f"Image preprocessing failed: {e}")
-        return None
+        raise ValueError(f"Image preprocessing failed: {str(e)}")
 
-@app.route('/')
+
+@app.get("/")
 def home():
-    return "Blood Classifier Image API is running 🚀"
+    return {"message": "Welcome to Blood Group Classifier API!"}
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
 
-    file = request.files['file']
-    image_bytes = file.read()
-    processed_image = preprocess_image(image_bytes)
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
+    try:
+        # Read file contents
+        contents = await file.read()
 
-    if processed_image is None:
-        return jsonify({'error': 'Image preprocessing failed'}), 400
+        # Preprocess image
+        processed_img = preprocess_image(contents)
 
-    predictions = model.predict(processed_image)
-    predicted_class_index = np.argmax(predictions, axis=1)[0]
-    predicted_blood_group = reverse_label_map[predicted_class_index]
-    confidence = float(np.max(predictions) * 100)
+        # Make prediction
+        predictions = model.predict(processed_img)
+        class_idx = int(np.argmax(predictions, axis=1)[0])
+        blood_group = reverse_label_map[class_idx]
+        confidence = float(np.max(predictions) * 100)
 
-    return jsonify({
-        'predicted_blood_group': predicted_blood_group,
-        'confidence': confidence
-    })
+        return JSONResponse({
+            "filename": file.filename,
+            "predicted_blood_group": blood_group,
+            "confidence": f"{confidence:.2f}%"
+        })
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
